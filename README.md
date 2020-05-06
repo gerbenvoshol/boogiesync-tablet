@@ -1,9 +1,9 @@
 # boogiesync-tablet
-A userspace linux driver (written in C) for using the Boogie Board Sync 9.7 as a tablet input device 
+A userspace linux driver (written in C) for using the Boogie Board Sync 9.7 as a bluetooth tablet input device 
 
 # Introduction
 
-This is an implementation of a userspace linux driver for using the Boogie Board Sync 9.7 as a tablet under linux.  There is only one apps for bluetooth.  It uses libbluetooth (bluez) to interface with the device and the UInput system (via libevdev) to generate input signals. This is quickly hacked togehter, so it may be unstable and full of bugs.
+This is an implementation of a userspace linux driver for using the Boogie Board Sync 9.7 as a bluetooth tablet under linux.  There is only one apps for bluetooth.  It uses libbluetooth (bluez) to interface with the device and the UInput system (via libevdev) to generate input signals. This is quickly hacked togehter, so it may be unstable and full of bugs.
 
 # Requirements
 
