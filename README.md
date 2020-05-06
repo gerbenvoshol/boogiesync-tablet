@@ -11,6 +11,11 @@ This is an implementation of a userspace linux driver for using the Boogie Board
 - libbluetooth (bluez for bluetooth)
 - libevdev
 
+
+# Compilation
+
+Compile with: gcc -o blue blue.c -lbluetooth -Wall -ggdb -levdev -I /usr/include/libevdev-1.0/
+
 # Usage
 
 For bluetooth, it should scan for your device. For the Boogie Board to be discoverable, you should have it turned off and turn the device on by pressing the power and the save button simultaniously. If this does not work, run blue with a specific address (e.g., ./blue A0:E6:F8:A1:72:DD) which you can discover using "hcitool scan" or other tools.
