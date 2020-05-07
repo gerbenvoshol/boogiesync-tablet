@@ -15,21 +15,73 @@
 #include <libevdev/libevdev-uinput.h>
 
 
+#include <string.h>
+#include <sys/select.h>
+#include <termios.h>
+
+struct termios orig_termios;
+
+void reset_terminal_mode()
+{
+    tcsetattr(0, TCSANOW, &orig_termios);
+}
+
+void set_nonbocking_terminal_mode()
+{
+    struct termios new_termios;
+
+    /* take two copies - one for now, one for later */
+    tcgetattr(0, &orig_termios);
+    memcpy(&new_termios, &orig_termios, sizeof(new_termios));
+
+    /* register cleanup handler, and set the new terminal mode */
+    atexit(reset_terminal_mode);
+    cfmakeraw(&new_termios);
+    tcsetattr(0, TCSANOW, &new_termios);
+}
+
+int kbhit()
+{
+    struct timeval tv = { 0L, 0L };
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    return select(1, &fds, NULL, NULL, &tv);
+}
+
+int getch()
+{
+    int r;
+    unsigned char c;
+    if ((r = read(0, &c, sizeof(c))) < 0) {
+        return r;
+    } else {
+        return c;
+    }
+}
+
+
 int main(int argc, char **argv)
 {
     inquiry_info *inquiry_infos = NULL;
     int max_responses, num_responses;
     int device_id, sock, len, flags;
     int i;
+    int err;
     char addr[248] = { 0 };
     char device_name[248] = { 0 };
     int found = 0;
-    
+    uint8_t channel = 0;
+
     if (argc == 1 ) {
         printf("No device address given, will try and find it\n");
     } else if (argc == 2) {
         found = 1;
         strcpy(addr, argv[1]);
+    } else if (argc == 3) {
+        found = 1;
+        strcpy(addr, argv[1]);
+        channel = atoi(argv[2]);
     }
 
     device_id = hci_get_route(NULL);
@@ -65,86 +117,94 @@ int main(int argc, char **argv)
 
     close( sock );
 
-    //uuid = "d6a56f80-88f8-11e3-baa8-0800200c9a66";
-    uint8_t svc_uuid_int[] = { 0xd6, 0xa5, 0x6f, 0x80, 0x88, 0xf8, 0x11, 0xe3, 0xba, 0xa8, 0x08, 0x00, 
-        0x20, 0x0c, 0x9a, 0x66 };
-    uuid_t svc_uuid;
-    int err;
-    bdaddr_t target;
-    sdp_list_t *response_list = NULL, *search_list, *attrid_list;
-    sdp_session_t *session = 0;
+    // If we did not get channel information, we will try and find it
+    if (!channel) {
+        //uuid = "d6a56f80-88f8-11e3-baa8-0800200c9a66";
+        uint8_t svc_uuid_int[] = { 0xd6, 0xa5, 0x6f, 0x80, 0x88, 0xf8, 0x11, 0xe3, 0xba, 0xa8, 0x08, 0x00, 
+            0x20, 0x0c, 0x9a, 0x66 };
+        uuid_t svc_uuid;
+        bdaddr_t target;
+        sdp_list_t *response_list = NULL, *search_list, *attrid_list;
+        sdp_session_t *session = 0;
 
-    str2ba( addr, &target );
+        str2ba( addr, &target );
 
-    // connect to the SDP server running on the remote machine
-    session = sdp_connect( BDADDR_ANY, &target, SDP_RETRY_IF_BUSY );
+        // connect to the SDP server running on the remote machine
+        session = sdp_connect( BDADDR_ANY, &target, SDP_RETRY_IF_BUSY );
+        if (!session) {
+           printf("sdp_connect failed\n");
+           return 1;
+        }
 
-    // specify the UUID of the application we're searching for
-     sdp_uuid128_create( &svc_uuid, &svc_uuid_int );
-   // bt_string_to_uuid128(&svc_uuid, uuid);
-    search_list = sdp_list_append( NULL, &svc_uuid );
+        // specify the UUID of the application we're searching for
+        sdp_uuid128_create( &svc_uuid, &svc_uuid_int );
+       // bt_string_to_uuid128(&svc_uuid, uuid);
+        search_list = sdp_list_append( NULL, &svc_uuid );
 
-    // specify that we want a list of all the matching applications' attributes
-    uint32_t range = 0x0000ffff;
-    attrid_list = sdp_list_append( NULL, &range );
+        // specify that we want a list of all the matching applications' attributes
+        uint32_t range = 0x0000ffff;
+        attrid_list = sdp_list_append( NULL, &range );
 
-    // get a list of service records that have UUID 0xabcd
-    err = sdp_service_search_attr_req( session, search_list, \
-            SDP_ATTR_REQ_RANGE, attrid_list, &response_list);
+        // get a list of service records that have UUID 0xabcd
+        err = sdp_service_search_attr_req( session, search_list, \
+                SDP_ATTR_REQ_RANGE, attrid_list, &response_list);
 
-    sdp_list_t *r = response_list;
+        sdp_list_t *r = response_list;
 
-    uint8_t channel = 0;
+        // go through each of the service records
+        for (; r; r = r->next ) {
+            sdp_record_t *rec = (sdp_record_t*) r->data;
+            sdp_list_t *proto_list;
+            
+            // get a list of the protocol sequences
+            if( sdp_get_access_protos( rec, &proto_list ) == 0 ) {
+            sdp_list_t *p = proto_list;
+            
+            printf("Found service record 0x%x\n", rec->handle);
 
-    // go through each of the service records
-    for (; r; r = r->next ) {
-        sdp_record_t *rec = (sdp_record_t*) r->data;
-        sdp_list_t *proto_list;
-        
-        // get a list of the protocol sequences
-        if( sdp_get_access_protos( rec, &proto_list ) == 0 ) {
-        sdp_list_t *p = proto_list;
-        
-        printf("Found service record 0x%x\n", rec->handle);
+            // go through each protocol sequence
+            for( ; p ; p = p->next ) {
+                sdp_list_t *pds = (sdp_list_t*)p->data;
 
-        // go through each protocol sequence
-        for( ; p ; p = p->next ) {
-            sdp_list_t *pds = (sdp_list_t*)p->data;
+                // go through each protocol list of the protocol sequence
+                for( ; pds ; pds = pds->next ) {
 
-            // go through each protocol list of the protocol sequence
-            for( ; pds ; pds = pds->next ) {
-
-                // check the protocol attributes
-                sdp_data_t *d = (sdp_data_t*)pds->data;
-                int proto = 0;
-                for( ; d; d = d->next ) {
-                    switch( d->dtd ) { 
-                        case SDP_UUID16:
-                        case SDP_UUID32:
-                        case SDP_UUID128:
-                            proto = sdp_uuid_to_proto( &d->val.uuid );
-                            break;
-                        case SDP_UINT8:
-                            if( proto == RFCOMM_UUID ) {
-                                printf("Found rfcomm channel: %d\n",d->val.int8);
-                                channel = d->val.int8;
-                            }
-                            break;
+                    // check the protocol attributes
+                    sdp_data_t *d = (sdp_data_t*)pds->data;
+                    int proto = 0;
+                    for( ; d; d = d->next ) {
+                        switch( d->dtd ) { 
+                            case SDP_UUID16:
+                            case SDP_UUID32:
+                            case SDP_UUID128:
+                                proto = sdp_uuid_to_proto( &d->val.uuid );
+                                break;
+                            case SDP_UINT8:
+                                if( proto == RFCOMM_UUID ) {
+                                    printf("Found rfcomm channel: %d\n",d->val.int8);
+                                    channel = d->val.int8;
+                                }
+                                break;
+                        }
                     }
                 }
+                sdp_list_free( (sdp_list_t*)p->data, 0 );
             }
-            sdp_list_free( (sdp_list_t*)p->data, 0 );
+            
+            sdp_record_free( rec );
+
+            sdp_list_free( proto_list, 0 );
+
+            }
         }
-        
-        sdp_record_free( rec );
 
-        sdp_list_free( proto_list, 0 );
+        sdp_close(session);
 
+        if (!channel) {
+            printf("No channel found!\n");
+            return 1;
         }
     }
-
-    sdp_close(session);
-
     printf("Trying to connect to: %s using channel %i\n", addr, channel);
 
     struct sockaddr_rc sockaddr = { 0 };
@@ -182,11 +242,18 @@ int main(int argc, char **argv)
             printf("Received %i out of %li bytes [%x%x%x%x%x%x]\n", bytes_read, sizeof(resp), buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
             if (!memcmp(buf, resp, sizeof(resp))) {
                 printf("Correct response\n");
+            } else {
+                printf("Wrong response\n");
+                close(sock);
+                return 1;
             }
         }
     }
 
-    if( status < 0 ) perror("uh oh");
+    if( status < 0 ) {
+        perror("uh oh");
+        return 1;
+    }
 
     printf("Setting up input device\n");
 
@@ -243,9 +310,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int true = 1;
     printf("Reading events\n");
-    while (true) {
+    set_nonbocking_terminal_mode();
+    while (1) {
+        if (kbhit()) {
+            int ch = getch();
+            if (ch == 'q') {
+                break;
+            }
+        }
+
         bytes_read = read(sock, buf, sizeof(buf));
 
         if (bytes_read != 14) {// ||  buf[0] != 192 || buf[1] != 1 || buf[2] != 161) {
@@ -292,14 +366,9 @@ int main(int argc, char **argv)
 
     close(sock);
 
-    // libevdev_uinput_write_event(uidev, EV_KEY, KEY_A, 1);
-    // libevdev_uinput_write_event(uidev, EV_SYN, SYN_REPORT, 0);
-    // libevdev_uinput_write_event(uidev, EV_KEY, KEY_A, 0);
-    // libevdev_uinput_write_event(uidev, EV_SYN, SYN_REPORT, 0);
-
     libevdev_uinput_destroy(uidev);
     printf("Complete\n");
-
+ 
     free( inquiry_infos );
 
     return 0;
